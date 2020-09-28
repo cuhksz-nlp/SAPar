@@ -1,4 +1,4 @@
-# SAttParser
+# SAPar
 
 Submission to EMNLP 2020
 

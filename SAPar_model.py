@@ -19,6 +19,7 @@ import chart_helper
 import nkutil
 
 import trees
+import math
 
 START = "<START>"
 STOP = "<STOP>"
@@ -151,6 +152,14 @@ class LayerNormalization(nn.Module):
         if self.affine:
             ln_out = ln_out * self.a_2.expand_as(ln_out) + self.b_2.expand_as(ln_out)
 
+        # NOTE(nikita): the t2t code does the following instead, with eps=1e-6
+        # However, I currently have no reason to believe that this difference in
+        # implementation matters.
+        # mu = torch.mean(z, keepdim=True, dim=-1)
+        # variance = torch.mean((z - mu.expand_as(z))**2, keepdim=True, dim=-1)
+        # ln_out = (z - mu.expand_as(z)) * torch.rsqrt(variance + self.eps).expand_as(z)
+        # ln_out = ln_out * self.a_2.expand_as(ln_out) + self.b_2.expand_as(ln_out)
+
         return ln_out
 
 # %%
@@ -163,6 +172,9 @@ class ScaledDotProductAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, q, k, v, attn_mask=None):
+        # q: [batch, slot, feat]
+        # k: [batch, slot, feat]
+        # v: [batch, slot, feat]
 
         attn = torch.bmm(q, k.transpose(1, 2)) / self.temper
 
@@ -175,6 +187,10 @@ class ScaledDotProductAttention(nn.Module):
             attn.data.masked_fill_(attn_mask, -float('inf'))
 
         attn = self.softmax(attn)
+        # Note that this makes the distribution not sum to 1. At some point it
+        # may be worth researching whether this is the right way to apply
+        # dropout to the attention.
+        # Note that the t2t code also applies dropout in this manner
         attn = self.dropout(attn)
         output = torch.bmm(attn, v)
 
@@ -231,6 +247,8 @@ class MultiHeadAttention(nn.Module):
         self.layer_norm = LayerNormalization(d_model)
 
         if not self.partitioned:
+            # The lack of a bias term here is consistent with the t2t code, though
+            # in my experiments I have never observed this making a difference.
             self.proj = nn.Linear(n_head*d_v, d_model, bias=False)
         else:
             self.proj1 = nn.Linear(n_head*(d_v//2), self.d_content, bias=False)
@@ -265,7 +283,9 @@ class MultiHeadAttention(nn.Module):
         return q_s, k_s, v_s
 
     def pad_and_rearrange(self, q_s, k_s, v_s, batch_idxs):
-
+        # Input is padded representation: n_head x len_inp x d
+        # Output is packed representation: (n_head * mb_size) x len_padded x d
+        # (along with masks for the attention and output)
         n_head = self.n_head
         d_k, d_v = self.d_k, self.d_v
 
@@ -317,8 +337,11 @@ class MultiHeadAttention(nn.Module):
     def forward(self, inp, batch_idxs, qk_inp=None):
         residual = inp
 
+        # While still using a packed representation, project to obtain the
+        # query/key/value for each head
         q_s, k_s, v_s = self.split_qkv_packed(inp, qk_inp=qk_inp)
 
+        # Switch to padded representation, perform attention, then switch back
         q_padded, k_padded, v_padded, attn_mask, output_mask = self.pad_and_rearrange(q_s, k_s, v_s, batch_idxs)
 
         outputs_padded, attns_padded = self.attention(
@@ -335,6 +358,12 @@ class MultiHeadAttention(nn.Module):
 # %%
 
 class PositionwiseFeedForward(nn.Module):
+    """
+    A position-wise feed forward module.
+
+    Projects to a higher-dimensional space before applying ReLU, then projects
+    back.
+    """
 
     def __init__(self, d_hid, d_ff, relu_dropout=0.1, residual_dropout=0.1):
         super(PositionwiseFeedForward, self).__init__()
@@ -342,7 +371,9 @@ class PositionwiseFeedForward(nn.Module):
         self.w_2 = nn.Linear(d_ff, d_hid)
 
         self.layer_norm = LayerNormalization(d_hid)
-
+        # The t2t code on github uses relu dropout, even though the transformer
+        # paper describes residual dropout only. We implement relu dropout
+        # because we always have the option to set it to zero.
         self.relu_dropout = FeatureDropout(relu_dropout)
         self.residual_dropout = FeatureDropout(residual_dropout)
         self.relu = nn.ReLU()
@@ -369,7 +400,9 @@ class PartitionedPositionwiseFeedForward(nn.Module):
         self.w_2c = nn.Linear(d_ff//2, self.d_content)
         self.w_2p = nn.Linear(d_ff//2, d_positional)
         self.layer_norm = LayerNormalization(d_hid)
-
+        # The t2t code on github uses relu dropout, even though the transformer
+        # paper describes residual dropout only. We implement relu dropout
+        # because we always have the option to set it to zero.
         self.relu_dropout = FeatureDropout(relu_dropout)
         self.residual_dropout = FeatureDropout(residual_dropout)
         self.relu = nn.ReLU()
@@ -470,6 +503,7 @@ class MultiLevelEmbedding(nn.Module):
         else:
             annotations = content_annotations + timing_signal
 
+        # TODO(nikita): reconsider the use of layernorm here
         annotations = self.layer_norm(self.dropout(annotations, batch_idxs))
 
         return annotations, timing_signal, batch_idxs
@@ -489,7 +523,7 @@ class CharacterLSTM(nn.Module):
         self.lstm = nn.LSTM(self.d_embedding, self.d_out // 2, num_layers=1, bidirectional=True)
 
         self.emb = nn.Embedding(num_embeddings, self.d_embedding, **kwargs)
-
+        #TODO(nikita): feature-level dropout?
         self.char_dropout = nn.Dropout(char_dropout)
 
         if normalize:
@@ -524,31 +558,54 @@ class CharacterLSTM(nn.Module):
 
 # %%
 def get_elmo_class():
+    # Avoid a hard dependency by only importing Elmo if it's being used
     from allennlp.modules.elmo import Elmo
     return Elmo
 
 
-def get_xlnet(xlnet_model, xlnet_do_lower_case):
+def get_xlnet(xlnet_model, xlnet_do_lower_case, hpara=None):
+    # Avoid a hard dependency on BERT by only importing it if it's being used
     from pytorch_transformers import (WEIGHTS_NAME, XLNetModel,
                                       XLMConfig, XLMForSequenceClassification,
                                       XLMTokenizer, XLNetConfig,
                                       XLNetForSequenceClassification,
                                       XLNetTokenizer)
-    tokenizer = XLNetTokenizer.from_pretrained(xlnet_model, do_lower_case=xlnet_do_lower_case)
-    xlnet = XLNetModel.from_pretrained(xlnet_model)
+    if hpara is None:
+        tokenizer = XLNetTokenizer.from_pretrained(xlnet_model, do_lower_case=xlnet_do_lower_case)
+        xlnet = XLNetModel.from_pretrained(xlnet_model)
+    else:
+        tokenizer = hpara['xlnet_tokenizer']
+        xlnet = XLNetModel(hpara['config'])
 
     return tokenizer, xlnet
 
 
 # %%
-def get_bert(bert_model, bert_do_lower_case):
+def get_bert(bert_model, bert_do_lower_case, hpara=None):
+    # Avoid a hard dependency on BERT by only importing it if it's being used
     from pytorch_pretrained_bert import BertTokenizer, BertModel
-    if bert_model.endswith('.tar.gz'):
-        tokenizer = BertTokenizer.from_pretrained(bert_model.replace('.tar.gz', '-vocab.txt'), do_lower_case=bert_do_lower_case)
+    if hpara is None:
+        if bert_model.endswith('.tar.gz'):
+            tokenizer = BertTokenizer.from_pretrained(bert_model.replace('.tar.gz', '-vocab.txt'), do_lower_case=bert_do_lower_case)
+        else:
+            tokenizer = BertTokenizer.from_pretrained(bert_model, do_lower_case=bert_do_lower_case)
+        bert = BertModel.from_pretrained(bert_model)
     else:
-        tokenizer = BertTokenizer.from_pretrained(bert_model, do_lower_case=bert_do_lower_case)
-    bert = BertModel.from_pretrained(bert_model)
+        tokenizer = hpara['bert_tokenizer']
+        bert = BertModel(hpara['config'])
     return tokenizer, bert
+
+def get_zen(zen_model, hpara=None):
+    import pytorch_pretrained_zen as zen
+    if hpara is None:
+        zen_tokenizer = zen.BertTokenizer.from_pretrained(zen_model, do_lower_case=False)
+        zen_ngram_dict = zen.ZenNgramDict(zen_model, tokenizer=zen_tokenizer)
+        zen = zen.modeling.ZenModel.from_pretrained(zen_model, cache_dir='')
+    else:
+        zen_tokenizer = hpara['zen_tokenizer']
+        zen_ngram_dict = hpara['zen_ngram_dict']
+        zen = zen.modeling.ZenModel(hpara['config'])
+    return zen_tokenizer, zen, zen_ngram_dict
 
 # %%
 
@@ -559,7 +616,8 @@ class Encoder(nn.Module):
                     num_layers_position_only=0,
                     relu_dropout=0.1, residual_dropout=0.1, attention_dropout=0.1):
         super().__init__()
-
+        # Don't assume ownership of the embedding as a submodule.
+        # TODO(nikita): what's the right thing to do here?
         self.embedding_container = [embedding]
         d_model = embedding.d_embedding
 
@@ -705,8 +763,10 @@ class SpanNgramAttentions(nn.Module):
 
         return character_attention
 
-class NKChartParser(nn.Module):
-
+class SAChartParser(nn.Module):
+    # We never actually call forward() end-to-end as is typical for pytorch
+    # modules, but this inheritance brings in good stuff like state dict
+    # management.
     def __init__(
             self,
             tag_vocab,
@@ -715,6 +775,7 @@ class NKChartParser(nn.Module):
             char_vocab,
             ngram_vocab,
             hparams,
+            restore=False,
     ):
         super().__init__()
         self.spec = locals()
@@ -755,7 +816,7 @@ class NKChartParser(nn.Module):
 
         self.morpho_emb_dropout = None
         if hparams.use_chars_lstm or hparams.use_elmo or hparams.use_bert or hparams.use_bert_only \
-                or hparams.use_xlnet or hparams.use_xlnet_only:
+                or hparams.use_xlnet or hparams.use_xlnet_only or hparams.use_zen:
             self.morpho_emb_dropout = hparams.morpho_emb_dropout
         else:
             assert self.emb_types, "Need at least one of: use_tags, use_words, use_chars_lstm, use_elmo, use_bert, use_bert_only"
@@ -789,11 +850,21 @@ class NKChartParser(nn.Module):
                 )
             d_elmo_annotations = 1024
 
+            # Don't train gamma parameter for ELMo - the projection can do any
+            # necessary scaling
             self.elmo.scalar_mix_0.gamma.requires_grad = False
 
+            # Reshapes the embeddings to match the model dimension, and making
+            # the projection trainable appears to improve parsing accuracy
             self.project_elmo = nn.Linear(d_elmo_annotations, self.d_content, bias=False)
         elif hparams.use_xlnet or hparams.use_xlnet_only:
-            self.xlnet_tokenizer, self.xlnet = get_xlnet(hparams.xlnet_model, hparams.xlnet_do_lower_case)
+            if restore:
+                self.xlnet_tokenizer, self.xlnet = get_xlnet(None, None,
+                                                             hpara=self.spec['hparams'])
+            else:
+                self.xlnet_tokenizer, self.xlnet = get_xlnet(hparams.xlnet_model, hparams.xlnet_do_lower_case)
+                self.spec['hparams']['xlnet_tokenizer'] = self.xlnet_tokenizer
+                self.spec['hparams']['config'] = self.xlnet.config
             if hparams.bert_transliterate:
                 from transliterate import TRANSLITERATIONS
                 self.bert_transliterate = TRANSLITERATIONS[hparams.bert_transliterate]
@@ -812,7 +883,13 @@ class NKChartParser(nn.Module):
                 use_encoder = True
 
         elif hparams.use_bert or hparams.use_bert_only:
-            self.bert_tokenizer, self.bert = get_bert(hparams.bert_model, hparams.bert_do_lower_case)
+            if restore:
+                self.bert_tokenizer, self.bert = get_bert(None, None,
+                                                          hpara=self.spec['hparams'])
+            else:
+                self.bert_tokenizer, self.bert = get_bert(hparams.bert_model, hparams.bert_do_lower_case)
+                self.spec['hparams']['bert_tokenizer'] = self.bert_tokenizer
+                self.spec['hparams']['config'] = self.bert.config
             if hparams.bert_transliterate:
                 from transliterate import TRANSLITERATIONS
                 self.bert_transliterate = TRANSLITERATIONS[hparams.bert_transliterate]
@@ -830,6 +907,34 @@ class NKChartParser(nn.Module):
             if not hparams.use_bert_only:
                 use_encoder = True
 
+        elif hparams.use_zen:
+            if restore:
+                self.zen_tokenizer, self.zen, self.zen_ngram_dict = get_zen(None,
+                                                                            hpara=self.spec['hparams'])
+            else:
+                self.zen_tokenizer, self.zen, self.zen_ngram_dict = get_zen(hparams.zen_model)
+                self.spec['hparams']['zen_tokenizer'] = self.zen_tokenizer
+                self.spec['hparams']['config'] = self.zen.config
+                self.spec['hparams']['zen_ngram_dict'] = self.zen_ngram_dict
+
+            if hparams.bert_transliterate:
+                from transliterate import TRANSLITERATIONS
+                self.bert_transliterate = TRANSLITERATIONS[hparams.bert_transliterate]
+            else:
+                self.bert_transliterate = None
+
+            d_zen_annotations = self.zen.pooler.dense.in_features
+            self.zen_max_len = self.zen.embeddings.position_embeddings.num_embeddings
+
+            # if hparams.use_bert_only:
+            #     self.project_bert = nn.Linear(d_zen_annotations, hparams.d_model, bias=False)
+            # else:
+            self.project_zen = nn.Linear(d_zen_annotations, self.d_content, bias=False)
+
+            # if not hparams.use_bert_only:
+            use_encoder = True
+
+        # if not hparams.use_bert_only:
         if use_encoder:
             self.embedding = MultiLevelEmbedding(
                 [num_embeddings_map[emb_type] for emb_type in self.emb_types],
@@ -858,6 +963,9 @@ class NKChartParser(nn.Module):
             self.embedding = None
             self.encoder = None
 
+        # self.ngram_attentions = NgramAttentions(ngram_size=self.ngram_vocab.size,
+        #                                         d_emb=hparams.d_model,
+        #                                         n_channels=self.ngram_channels)
         self.span_nagram_attentions = SpanNgramAttentions(ngram_size=self.ngram_vocab.size,
                                                           d_emb=hparams.d_model,
                                                           n_channels=self.ngram_channels)
@@ -865,7 +973,7 @@ class NKChartParser(nn.Module):
 
         self.f_label = nn.Sequential(
             nn.Linear(hparams.d_model * (self.ngram_channels + 1), hparams.d_label_hidden),
-
+            # nn.Linear(hparams.d_model, hparams.d_label_hidden),
             LayerNormalization(hparams.d_label_hidden),
             nn.ReLU(),
             nn.Linear(hparams.d_label_hidden, label_vocab.size - 1),
@@ -912,6 +1020,7 @@ class NKChartParser(nn.Module):
             hparams['bert_transliterate'] = ""
 
         spec['hparams'] = nkutil.HParams(**hparams)
+        spec['restore'] = True
         res = cls(**spec)
         if use_cuda:
             res.cpu()
@@ -996,7 +1105,7 @@ class NKChartParser(nn.Module):
         if self.char_encoder is not None:
             assert isinstance(self.char_encoder, CharacterLSTM)
             max_word_len = max([max([len(word) for tag, word in sentence]) for sentence in sentences])
-
+            # Add 2 for start/stop tokens
             max_word_len = max(max_word_len, 3) + 2
             char_idxs_encoder = np.zeros((packed_len, max_word_len), dtype=int)
             word_lens_encoder = np.zeros(packed_len, dtype=int)
@@ -1023,11 +1132,14 @@ class NKChartParser(nn.Module):
 
             extra_content_annotations = self.char_encoder(char_idxs_encoder, word_lens_encoder, batch_idxs)
         elif self.elmo is not None:
-
+            # See https://github.com/allenai/allennlp/blob/c3c3549887a6b1fb0bc8abf77bc820a3ab97f788/allennlp/data/token_indexers/elmo_indexer.py#L61
+            # ELMO_START_SENTENCE = 256
+            # ELMO_STOP_SENTENCE = 257
             ELMO_START_WORD = 258
             ELMO_STOP_WORD = 259
             ELMO_CHAR_PAD = 260
 
+            # Sentence start/stop tokens are added inside the ELMo module
             max_sentence_len = max([(len(sentence)) for sentence in sentences])
             max_word_len = 50
             char_idxs_encoder = np.zeros((len(sentences), max_sentence_len, max_word_len), dtype=int)
@@ -1045,6 +1157,7 @@ class NKChartParser(nn.Module):
                         j += 1
                     char_idxs_encoder[snum, wordnum, j] = ELMO_STOP_WORD
 
+                    # +1 for masking (everything that stays 0 is past the end of the sentence)
                     char_idxs_encoder[snum, wordnum, :] += 1
 
             char_idxs_encoder = from_numpy(char_idxs_encoder)
@@ -1055,6 +1168,7 @@ class NKChartParser(nn.Module):
 
             elmo_annotations_packed = elmo_rep0[elmo_mask.byte()].view(packed_len, -1)
 
+            # Apply projection to match dimensionality
             extra_content_annotations = self.project_elmo(elmo_annotations_packed)
         elif self.xlnet is not None:
             all_input_ids = np.zeros((len(sentences), self.xlnet_max_len), dtype=int)
@@ -1076,9 +1190,11 @@ class NKChartParser(nn.Module):
                     cleaned_words = []
                     for _, word in sentence:
                         word = BERT_TOKEN_MAPPING.get(word, word)
-
+                        # This un-escaping for / and * was not yet added for the
+                        # parser version in https://arxiv.org/abs/1812.11760v1
+                        # and related model releases (e.g. benepar_en2)
                         word = word.replace('\\/', '/').replace('\\*', '*')
-
+                        # Mid-token punctuation occurs in biomedical text
                         word = word.replace('-LSB-', '[').replace('-RSB-', ']')
                         word = word.replace('-LRB-', '(').replace('-RRB-', ')')
                         if word == "n't" and cleaned_words:
@@ -1086,6 +1202,8 @@ class NKChartParser(nn.Module):
                             word = "'t"
                         cleaned_words.append(word)
                 else:
+                    # When transliterating, assume that the token mapping is
+                    # taken care of elsewhere
                     cleaned_words = [self.bert_transliterate(word) for _, word in sentence]
 
                 for word in cleaned_words:
@@ -1102,8 +1220,14 @@ class NKChartParser(nn.Module):
                 word_start_mask.append(1)
                 word_end_mask.append(1)
 
+                # tokens.append(self.xlnet_tokenizer.cls_token)
+                # word_start_mask.append(1)
+                # word_end_mask.append(1)
+
                 input_ids = self.xlnet_tokenizer.convert_tokens_to_ids(tokens)
 
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real
+                # tokens are attended to.
                 input_mask = [1] * len(input_ids)
 
                 subword_max_len = max(subword_max_len, len(input_ids))
@@ -1123,12 +1247,14 @@ class NKChartParser(nn.Module):
                 np.ascontiguousarray(all_word_end_mask[:, :subword_max_len]))
 
             transformer_outputs = self.xlnet(all_input_ids, attention_mask=all_input_mask)
+            # features = all_encoder_layers[-1]
             features = transformer_outputs[0]
 
             if self.encoder is not None:
                 features_packed = features.masked_select(
                     all_word_end_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
 
+                # For now, just project the features from the last word piece in each word
                 extra_content_annotations = self.project_xlnet(features_packed)
         elif self.bert is not None:
             all_input_ids = np.zeros((len(sentences), self.bert_max_len), dtype=int)
@@ -1150,9 +1276,11 @@ class NKChartParser(nn.Module):
                     cleaned_words = []
                     for _, word in sentence:
                         word = BERT_TOKEN_MAPPING.get(word, word)
-
+                        # This un-escaping for / and * was not yet added for the
+                        # parser version in https://arxiv.org/abs/1812.11760v1
+                        # and related model releases (e.g. benepar_en2)
                         word = word.replace('\\/', '/').replace('\\*', '*')
-
+                        # Mid-token punctuation occurs in biomedical text
                         word = word.replace('-LSB-', '[').replace('-RSB-', ']')
                         word = word.replace('-LRB-', '(').replace('-RRB-', ')')
                         if word == "n't" and cleaned_words:
@@ -1160,7 +1288,8 @@ class NKChartParser(nn.Module):
                             word = "'t"
                         cleaned_words.append(word)
                 else:
-
+                    # When transliterating, assume that the token mapping is
+                    # taken care of elsewhere
                     cleaned_words = [self.bert_transliterate(word) for _, word in sentence]
 
                 for word in cleaned_words:
@@ -1179,6 +1308,8 @@ class NKChartParser(nn.Module):
 
                 input_ids = self.bert_tokenizer.convert_tokens_to_ids(tokens)
 
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real
+                # tokens are attended to.
                 input_mask = [1] * len(input_ids)
 
                 subword_max_len = max(subword_max_len, len(input_ids))
@@ -1199,12 +1330,152 @@ class NKChartParser(nn.Module):
             if self.encoder is not None:
                 features_packed = features.masked_select(all_word_end_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
 
+                # For now, just project the features from the last word piece in each word
                 extra_content_annotations = self.project_bert(features_packed)
+
+        elif self.zen is not None:
+            all_input_ids = np.zeros((len(sentences), self.zen_max_len), dtype=int)
+            all_input_mask = np.zeros((len(sentences), self.zen_max_len), dtype=int)
+            all_word_start_mask = np.zeros((len(sentences), self.zen_max_len), dtype=int)
+            all_word_end_mask = np.zeros((len(sentences), self.zen_max_len), dtype=int)
+
+            all_ngram_ids = np.zeros((len(sentences), self.zen_ngram_dict.max_ngram_in_seq), dtype=int)
+            all_ngram_positions_matrix = np.zeros(shape=(len(sentences), self.zen_max_len,
+                                                         self.zen_ngram_dict.max_ngram_in_seq),
+                                                  dtype=np.int32)
+            subword_max_len = 0
+            subngram_max_len = 0
+            for snum, sentence in enumerate(sentences):
+                tokens = []
+                word_start_mask = []
+                word_end_mask = []
+
+                tokens.append("[CLS]")
+                word_start_mask.append(1)
+                word_end_mask.append(1)
+
+                if self.bert_transliterate is None:
+                    cleaned_words = []
+                    for _, word in sentence:
+                        word = BERT_TOKEN_MAPPING.get(word, word)
+                        # This un-escaping for / and * was not yet added for the
+                        # parser version in https://arxiv.org/abs/1812.11760v1
+                        # and related model releases (e.g. benepar_en2)
+                        word = word.replace('\\/', '/').replace('\\*', '*')
+                        # Mid-token punctuation occurs in biomedical text
+                        word = word.replace('-LSB-', '[').replace('-RSB-', ']')
+                        word = word.replace('-LRB-', '(').replace('-RRB-', ')')
+                        if word == "n't" and cleaned_words:
+                            cleaned_words[-1] = cleaned_words[-1] + "n"
+                            word = "'t"
+                        cleaned_words.append(word)
+                else:
+                    # When transliterating, assume that the token mapping is
+                    # taken care of elsewhere
+                    cleaned_words = [self.bert_transliterate(word) for _, word in sentence]
+
+                for word in cleaned_words:
+                    word_tokens = self.zen_tokenizer.tokenize(word)
+                    if len(word_tokens) == 0:
+                        word_tokens = ['[UNK]']
+                    for _ in range(len(word_tokens)):
+                        word_start_mask.append(0)
+                        word_end_mask.append(0)
+                    word_start_mask[len(tokens)] = 1
+                    word_end_mask[-1] = 1
+                    tokens.extend(word_tokens)
+                tokens.append("[SEP]")
+                word_start_mask.append(1)
+                word_end_mask.append(1)
+
+                input_ids = self.zen_tokenizer.convert_tokens_to_ids(tokens)
+
+                # The mask has 1 for real tokens and 0 for padding tokens. Only real
+                # tokens are attended to.
+                input_mask = [1] * len(input_ids)
+
+                subword_max_len = max(subword_max_len, len(input_ids))
+
+                all_input_ids[snum, :len(input_ids)] = input_ids
+                all_input_mask[snum, :len(input_mask)] = input_mask
+                all_word_start_mask[snum, :len(word_start_mask)] = word_start_mask
+                all_word_end_mask[snum, :len(word_end_mask)] = word_end_mask
+
+                ngram_matches = []
+                #  Filter the ngram segment from 2 to 7 to check whether there is a ngram
+                max_seq_length = len(input_ids)
+                for p in range(2, 8):
+                    for q in range(0, len(tokens) - p + 1):
+                        character_segment = tokens[q:q + p]
+                        # j is the starting position of the ngram
+                        # i is the length of the current ngram
+                        character_segment = tuple(character_segment)
+                        if character_segment in self.zen_ngram_dict.ngram_to_id_dict:
+                            ngram_index = self.zen_ngram_dict.ngram_to_id_dict[character_segment]
+                            ngram_matches.append([ngram_index, q, p, character_segment])
+
+                # random.shuffle(ngram_matches)
+                ngram_matches = sorted(ngram_matches, key=lambda s: s[0])
+
+                max_ngram_in_seq_proportion = math.ceil(
+                    (len(tokens) / max_seq_length) * self.zen_ngram_dict.max_ngram_in_seq)
+                if len(ngram_matches) > max_ngram_in_seq_proportion:
+                    ngram_matches = ngram_matches[:max_ngram_in_seq_proportion]
+
+                ngram_ids = [ngram[0] for ngram in ngram_matches]
+                ngram_positions = [ngram[1] for ngram in ngram_matches]
+                ngram_lengths = [ngram[2] for ngram in ngram_matches]
+                ngram_tuples = [ngram[3] for ngram in ngram_matches]
+                ngram_seg_ids = [0 if position < (len(tokens) + 2) else 1 for position in ngram_positions]
+
+                ngram_mask_array = np.zeros(self.zen_ngram_dict.max_ngram_in_seq, dtype=np.bool)
+                ngram_mask_array[:len(ngram_ids)] = 1
+
+                # record the masked positions
+                ngram_positions_matrix = np.zeros(shape=(max_seq_length, self.zen_ngram_dict.max_ngram_in_seq),
+                                                  dtype=np.int32)
+                for i in range(len(ngram_ids)):
+                    ngram_positions_matrix[ngram_positions[i]:ngram_positions[i] + ngram_lengths[i], i] = 1.0
+
+                # Zero-pad up to the max ngram in seq length.
+                padding = [0] * (self.zen_ngram_dict.max_ngram_in_seq - len(ngram_ids))
+                ngram_ids += padding
+                ngram_lengths += padding
+                ngram_seg_ids += padding
+
+                all_ngram_ids[snum] = ngram_ids
+                all_ngram_positions_matrix[snum, :ngram_positions_matrix.shape[0]] = ngram_positions_matrix
+
+            all_input_ids = from_numpy(np.ascontiguousarray(all_input_ids[:, :subword_max_len]))
+            all_input_mask = from_numpy(np.ascontiguousarray(all_input_mask[:, :subword_max_len]))
+            all_word_start_mask = from_numpy(np.ascontiguousarray(all_word_start_mask[:, :subword_max_len]))
+            all_word_end_mask = from_numpy(np.ascontiguousarray(all_word_end_mask[:, :subword_max_len]))
+
+            all_ngram_ids = from_numpy(np.ascontiguousarray(all_ngram_ids))
+            all_ngram_positions_matrix = from_numpy(np.ascontiguousarray(all_ngram_positions_matrix[:, :subword_max_len]))
+
+            all_encoder_layers, _ = self.zen(all_input_ids, input_ngram_ids=all_ngram_ids,
+                                             ngram_position_matrix=all_ngram_positions_matrix,
+                                             attention_mask=all_input_mask,
+                                             output_all_encoded_layers=False)
+            del _
+            features = all_encoder_layers
+
+            assert self.encoder is not None
+
+            if self.encoder is not None:
+                features_packed = features.masked_select(all_word_end_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
+
+                # For now, just project the features from the last word piece in each word
+                extra_content_annotations = self.project_zen(features_packed)
 
         if self.encoder is not None:
             annotations, _ = self.encoder(emb_idxs, batch_idxs, extra_content_annotations=extra_content_annotations)
 
             if self.partitioned:
+                # Rearrange the annotations to ensure that the transition to
+                # fenceposts captures an even split between position and content.
+                # TODO(nikita): try alternatives, such as omitting position entirely
                 annotations = torch.cat([
                     annotations[:, 0::2],
                     annotations[:, 1::2],
@@ -1220,7 +1491,7 @@ class NKChartParser(nn.Module):
             fencepost_annotations_start = fencepost_annotations
             fencepost_annotations_end = fencepost_annotations
         elif self.bert is not None:
-
+            # assert self.bert is not None
             features = self.project_bert(features)
             fencepost_annotations_start = features.masked_select(all_word_start_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
             fencepost_annotations_end = features.masked_select(all_word_end_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
@@ -1228,10 +1499,20 @@ class NKChartParser(nn.Module):
                 tag_annotations = fencepost_annotations_end
 
         elif self.xlnet is not None:
-
+            # assert self.xlnet is not None
             features = self.project_xlnet(features)
             fencepost_annotations_start = features.masked_select(all_word_start_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
             fencepost_annotations_end = features.masked_select(all_word_end_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
+            if self.f_tag is not None:
+                tag_annotations = fencepost_annotations_end
+
+        elif self.zen is not None:
+            # assert self.zen is not None
+            features = self.project_zen(features)
+            fencepost_annotations_start = features.masked_select(
+                all_word_start_mask.to(torch.uint8).unsqueeze(-1)).reshape(-1, features.shape[-1])
+            fencepost_annotations_end = features.masked_select(all_word_end_mask.to(torch.uint8).unsqueeze(-1)).reshape(
+                -1, features.shape[-1])
             if self.f_tag is not None:
                 tag_annotations = fencepost_annotations_end
 
@@ -1240,9 +1521,13 @@ class NKChartParser(nn.Module):
             if is_train:
                 tag_loss = self.tag_loss_scale * nn.functional.cross_entropy(tag_logits, gold_tag_idxs, reduction='sum')
 
+        # Note that the subtraction above creates fenceposts at sentence
+        # boundaries, which are not used by our parser. Hence subtract 1
+        # when creating fp_endpoints
         fp_startpoints = batch_idxs.boundaries_np[:-1]
         fp_endpoints = batch_idxs.boundaries_np[1:] - 1
 
+        # Just return the charts, for ensembling
         if return_label_scores_charts:
             charts = []
             for i, (start, end) in enumerate(zip(fp_startpoints, fp_endpoints)):
@@ -1254,7 +1539,7 @@ class NKChartParser(nn.Module):
             trees = []
             scores = []
             if self.f_tag is not None:
-
+                # Note that tag_logits includes tag predictions for start/stop tokens
                 tag_idxs = torch.argmax(tag_logits, -1).cpu()
                 per_sentence_tag_idxs = torch.split_with_sizes(tag_idxs, [len(sentence) + 2 for sentence in sentences])
                 per_sentence_tags = [[self.tag_vocab.value(idx) for idx in idxs[1:-1]] for idxs in per_sentence_tag_idxs]
@@ -1275,6 +1560,14 @@ class NKChartParser(nn.Module):
                 scores.append(score)
             return trees, scores
 
+        # During training time, the forward pass needs to be computed for every
+        # cell of the chart, but the backward pass only needs to be computed for
+        # cells in either the predicted or the gold parse tree. It's slightly
+        # faster to duplicate the forward pass for a subset of the chart than it
+        # is to perform a backward pass that doesn't take advantage of sparsity.
+        # Since this code is not undergoing algorithmic changes, it makes sense
+        # to include the optimization even though it may only be a 10% speedup.
+        # Note that no dropout occurs in the label portion of the network
         pis = []
         pjs = []
         plabels = []
@@ -1333,8 +1626,11 @@ class NKChartParser(nn.Module):
 
     def label_scores_from_annotations(self, fencepost_annotations_start, fencepost_annotations_end,
                                       sentence):
+        # Note that the bias added to the final layer norm is useless because
+        # this subtraction gets rid of it
         span_features = (torch.unsqueeze(fencepost_annotations_end, 0)
                          - torch.unsqueeze(fencepost_annotations_start, 1))
+        # spab_features[i][j] is fencepost_annotations_end[j] - fencepost_annotations_start[i]
         # ---------- ngram ----------
         packed_ngrams = [[] for _ in range(self.ngram_channels)]
         packed_matching_positions = [[] for _ in range(self.ngram_channels)]
@@ -1379,6 +1675,10 @@ class NKChartParser(nn.Module):
     def parse_from_annotations(self, label_scores_chart, sentence, gold=None):
         is_train = gold is not None
 
+        # label_scores_chart, span_attentions \
+        #     = self.label_scores_from_annotations(fencepost_annotations_start,
+        #                                          fencepost_annotations_end,
+        #                                          ngram_idxs, span_ngram_matching_matrix)
         label_scores_chart_np = label_scores_chart.cpu().data.numpy()
 
         if is_train:
@@ -1416,6 +1716,9 @@ class NKChartParser(nn.Module):
 
         force_gold = (gold is not None)
 
+        # The optimized cython decoder implementation doesn't actually
+        # generate trees, only scores and span indices. When converting to a
+        # tree, we assume that the indices follow a preorder traversal.
         score, p_i, p_j, p_label, _ = chart_helper.decode(force_gold, **decoder_args)
         last_splits = []
         idx = -1

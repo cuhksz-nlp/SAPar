@@ -1,2 +1,6 @@
 /logs/
-
+/sample_data/
+run*.sh
+/submit.py
+/lexicon_sample.zip
+/lexicon_sample/

@@ -16,14 +16,14 @@ import trees
 import vocabulary
 import nkutil
 from tqdm import tqdm
-import parse_model
+import SAPar_model
 import random
-tokens = parse_model
+tokens = SAPar_model
 
 from attutil import FindNgrams
 
 def torch_load(load_path):
-    if parse_model.use_cuda:
+    if SAPar_model.use_cuda:
         return torch.load(load_path)
     else:
         return torch.load(load_path, map_location=lambda storage, location: storage)
@@ -75,6 +75,7 @@ def make_hparams():
         use_chars_lstm=False,
         use_elmo=False,
         use_bert=False,
+        use_zen=False,
         use_bert_only=False,
         use_xlnet=False,
         use_xlnet_only=False,
@@ -96,6 +97,8 @@ def make_hparams():
         xlnet_model="xlnet-large-cased",
         xlnet_do_lower_case=False,
 
+        zen_model='',
+
         ngram=5,
         ngram_threshold=0,
         ngram_freq_threshold=1,
@@ -103,6 +106,19 @@ def make_hparams():
         )
 
 def run_train(args, hparams):
+    # if args.numpy_seed is not None:
+    #     print("Setting numpy random seed to {}...".format(args.numpy_seed))
+    #     np.random.seed(args.numpy_seed)
+    #
+    # # Make sure that pytorch is actually being initialized randomly.
+    # # On my cluster I was getting highly correlated results from multiple
+    # # runs, but calling reset_parameters() changed that. A brief look at the
+    # # pytorch source code revealed that pytorch initializes its RNG by
+    # # calling std::random_device, which according to the C++ spec is allowed
+    # # to be deterministic.
+    # seed_from_numpy = np.random.randint(2147483648)
+    # print("Manual seed for pytorch:", seed_from_numpy)
+    # torch.manual_seed(seed_from_numpy)
 
     now_time = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
     log_file_name = os.path.join(args.log_dir, 'log-' + now_time)
@@ -140,9 +156,16 @@ def run_train(args, hparams):
         dev_treebank = [tree for tree in dev_treebank if len(list(tree.leaves())) <= hparams.max_len_dev]
     logger.info("Loaded {:,} development examples.".format(len(dev_treebank)))
 
+    logger.info("Loading test trees from {}...".format(args.test_path))
+    test_treebank = trees.load_trees(args.test_path)
+    if hparams.max_len_dev > 0:
+        test_treebank = [tree for tree in test_treebank if len(list(tree.leaves())) <= hparams.max_len_dev]
+    logger.info("Loaded {:,} test examples.".format(len(test_treebank)))
+
     logger.info("Processing trees for training...")
     train_parse = [tree.convert() for tree in train_treebank]
     dev_parse = [tree.convert() for tree in dev_treebank]
+    test_parse = [tree.convert() for tree in test_treebank]
 
     logger.info("Constructing vocabularies...")
 
@@ -216,11 +239,35 @@ def run_train(args, hparams):
         return sentences
 
     sentence_list = get_sentence(train_parse)
-    sentence_list.extend(get_sentence(dev_parse))
+    if not args.cross_domain:
+        sentence_list.extend(get_sentence(dev_parse))
+    # sentence_list.extend(get_sentence(test_parse))
 
-    ngram_finder.find_ngrams_pmi(sentence_list, hparams.ngram, hparams.ngram_freq_threshold)
-
+    if hparams.ngram_type == 'freq':
+        logger.info('ngram type: freq')
+        ngram_finder.count_ngram(sentence_list, hparams.ngram)
+    elif hparams.ngram_type == 'pmi':
+        logger.info('ngram type: pmi')
+        ngram_finder.find_ngrams_pmi(sentence_list, hparams.ngram, hparams.ngram_freq_threshold)
+    else:
+        raise ValueError()
+    ngram_type_count = [0 for _ in range(hparams.ngram)]
+    for w, c in ngram_finder.ngrams.items():
+        ngram_type_count[len(list(w))-1] += 1
+        for _ in range(c):
+            ngram_vocab.index(w)
+    logger.info(str(ngram_type_count))
     ngram_vocab.freeze()
+
+    ngram_count = [0 for _ in range(hparams.ngram)]
+    for sentence in sentence_list:
+        for n in range(len(ngram_count)):
+            length = n + 1
+            for i in range(len(sentence)):
+                gram = tuple(sentence[i: i + length])
+                if gram in ngram_finder.ngrams:
+                    ngram_count[n] += 1
+    logger.info(str(ngram_count))
     # -------- ngram vocab ------------
 
     def print_vocabulary(name, vocab):
@@ -242,9 +289,9 @@ def run_train(args, hparams):
     if load_path is not None:
         logger.info(f"Loading parameters from {load_path}")
         info = torch_load(load_path)
-        parser = parse_model.NKChartParser.from_spec(info['spec'], info['state_dict'])
+        parser = SAPar_model.SAChartParser.from_spec(info['spec'], info['state_dict'])
     else:
-        parser = parse_model.NKChartParser(
+        parser = SAPar_model.SAChartParser(
             tag_vocab,
             word_vocab,
             label_vocab,
@@ -287,13 +334,14 @@ def run_train(args, hparams):
     current_processed = 0
     check_every = len(train_parse) / args.checks_per_epoch
     best_eval_fscore = -np.inf
+    test_fscore_on_dev = -np.inf
     best_eval_scores = None
     best_eval_model_path = None
     best_eval_processed = 0
 
     start_time = time.time()
 
-    def check_eval(eval_treebank, ep):
+    def check_eval(eval_treebank, ep, flag='dev'):
         # nonlocal best_eval_fscore
         # nonlocal best_eval_model_path
         # nonlocal best_eval_processed
@@ -311,7 +359,7 @@ def run_train(args, hparams):
         eval_fscore = evaluate.evalb(args.evalb_dir, eval_treebank, eval_predicted)
 
         logger.info(
-            'dev' + ' eval '
+            flag + ' eval '
             'epoch {} '
             "fscore {} "
             "elapsed {} "
@@ -324,36 +372,7 @@ def run_train(args, hparams):
         )
         return eval_fscore
 
-    def check_model(eval_fscore):
-        nonlocal best_eval_fscore
-        nonlocal best_eval_model_path
-        nonlocal best_eval_processed
-        nonlocal best_eval_scores
-
-        if eval_fscore.fscore > best_eval_fscore:
-            if best_eval_model_path is not None:
-                extensions = [".pt"]
-                for ext in extensions:
-                    path = best_eval_model_path + ext
-                    if os.path.exists(path):
-                        logger.info("Removing previous model file {}...".format(path))
-                        os.remove(path)
-            best_eval_fscore = eval_fscore.fscore
-            best_eval_scores = eval_fscore
-            best_eval_model_path = "{}_eval={:.2f}_{}".format(
-                args.model_path_base, eval_fscore.fscore, now_time)
-            best_eval_processed = total_processed
-            logger.info("Saving new best model to {}...".format(best_eval_model_path))
-            torch.save({
-                'spec': parser.spec,
-                'state_dict': parser.state_dict(),
-                'trainer' : trainer.state_dict(),
-                }, best_eval_model_path + ".pt")
-            return True
-        else:
-            return False
-
-    def save_model(eval_fscore):
+    def save_model(eval_fscore, remove_model):
         nonlocal best_eval_fscore
         nonlocal best_eval_model_path
         nonlocal best_eval_processed
@@ -363,7 +382,7 @@ def run_train(args, hparams):
             extensions = [".pt"]
             for ext in extensions:
                 path = best_eval_model_path + ext
-                if os.path.exists(path):
+                if os.path.exists(path) and remove_model:
                     logger.info("Removing previous model file {}...".format(path))
                     os.remove(path)
         best_eval_fscore = eval_fscore.fscore
@@ -375,9 +394,8 @@ def run_train(args, hparams):
         torch.save({
             'spec': parser.spec,
             'state_dict': parser.state_dict(),
-            'trainer' : trainer.state_dict(),
+            # 'trainer' : trainer.state_dict(),
             }, best_eval_model_path + ".pt")
-
 
     for epoch in itertools.count(start=1):
         if args.epochs is not None and epoch > args.epochs:
@@ -436,10 +454,12 @@ def run_train(args, hparams):
 
             if current_processed >= check_every:
                 current_processed -= check_every
-                dev_fscore = check_eval(dev_treebank, epoch)
+                dev_fscore = check_eval(dev_treebank, epoch, flag='dev')
+                test_fscore = check_eval(test_treebank, epoch, flag='test')
 
                 if dev_fscore.fscore > best_eval_fscore:
-                    save_model(dev_fscore)
+                    save_model(dev_fscore, remove_model=True)
+                    test_fscore_on_dev = test_fscore
 
         # adjust learning rate at the end of an epoch
         if (total_processed // args.batch_size + 1) > hparams.learning_rate_warmup_steps:
@@ -448,8 +468,9 @@ def run_train(args, hparams):
                     + ((hparams.step_decay_patience + 1) * hparams.max_consecutive_decays * len(train_parse)):
                 logger.info("Terminating due to lack of improvement in eval fscore.")
                 logger.info(
-                    "best dev {}".format(
+                    "best dev {} test {}".format(
                         best_eval_scores,
+                        test_fscore_on_dev,
                     )
                 )
                 break
@@ -464,7 +485,7 @@ def run_test(args):
 
     info = torch_load(args.model_path_base)
     assert 'hparams' in info['spec'], "Older savefiles not supported"
-    parser = parse_model.NKChartParser.from_spec(info['spec'], info['state_dict'])
+    parser = SAPar_model.SAChartParser.from_spec(info['spec'], info['state_dict'])
 
     print("Parsing test sentences...")
     start_time = time.time()
@@ -477,6 +498,14 @@ def run_test(args):
         del _
         test_predicted.extend([p.convert() for p in predicted])
 
+    # The tree loader does some preprocessing to the trees (e.g. stripping TOP
+    # symbols or SPMRL morphological features). We compare with the input file
+    # directly to be extra careful about not corrupting the evaluation. We also
+    # allow specifying a separate "raw" file for the gold trees: the inputs to
+    # our parser have traces removed and may have predicted tags substituted,
+    # and we may wish to compare against the raw gold trees to make sure we
+    # haven't made a mistake. As far as we can tell all of these variations give
+    # equivalent results.
     ref_gold_path = args.test_path
     if args.test_path_raw is not None:
         print("Comparing with raw trees from", args.test_path_raw)
@@ -499,6 +528,51 @@ def run_test(args):
     )
 
 
+def run_parse(args):
+    if args.output_path != '-' and os.path.exists(args.output_path):
+        print("Error: output file already exists:", args.output_path)
+        return
+
+    print("Loading model from {}...".format(args.model_path_base))
+    assert args.model_path_base.endswith(".pt"), "Only pytorch savefiles supported"
+
+    info = torch_load(args.model_path_base)
+    assert 'hparams' in info['spec'], "Older savefiles not supported"
+    parser = SAPar_model.SAChartParser.from_spec(info['spec'], info['state_dict'])
+
+    print("Parsing sentences...")
+    with open(args.input_path) as input_file:
+        sentences = input_file.readlines()
+    sentences = [sentence.split() for sentence in sentences]
+
+    # Tags are not available when parsing from raw text, so use a dummy tag
+    if 'UNK' in parser.tag_vocab.indices:
+        dummy_tag = 'UNK'
+    else:
+        dummy_tag = parser.tag_vocab.value(0)
+
+    start_time = time.time()
+
+    all_predicted = []
+    for start_index in range(0, len(sentences), args.eval_batch_size):
+        subbatch_sentences = sentences[start_index:start_index+args.eval_batch_size]
+
+        subbatch_sentences = [[(dummy_tag, word) for word in sentence] for sentence in subbatch_sentences]
+        predicted, _ = parser.parse_batch(subbatch_sentences)
+        del _
+        if args.output_path == '-':
+            for p in predicted:
+                print(p.convert().linearize())
+        else:
+            all_predicted.extend([p.convert() for p in predicted])
+
+    if args.output_path != '-':
+        with open(args.output_path, 'w') as output_file:
+            for tree in all_predicted:
+                output_file.write("{}\n".format(tree.linearize()))
+        print("Output written to:", args.output_path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
@@ -512,6 +586,7 @@ def main():
     subparser.add_argument("--evalb-dir", default="./EVALB/")
     subparser.add_argument("--train-path", default="./data/PTB/train.mrg")
     subparser.add_argument("--dev-path", default="./data/PTB/dev.mrg")
+    subparser.add_argument("--test-path", default="./data/PTB/test.mrg")
     subparser.add_argument("--log_dir", default="./logs/")
     subparser.add_argument("--batch-size", type=int, default=250)
     subparser.add_argument("--subbatch-max-tokens", type=int, default=2000)
@@ -521,6 +596,8 @@ def main():
     subparser.add_argument("--patients", type=int, default=0)
     subparser.add_argument("--print-vocabs", action="store_true")
     subparser.add_argument("--stop-f", type=float, default=None)
+    subparser.add_argument("--track-f", type=float, default=None)
+    subparser.add_argument("--cross-domain", action='store_true')
 
 
     subparser = subparsers.add_parser("test")
@@ -529,6 +606,13 @@ def main():
     subparser.add_argument("--evalb-dir", default="./EVALB/")
     subparser.add_argument("--test-path", default="./data/PTB/test.mrg")
     subparser.add_argument("--test-path-raw", type=str)
+    subparser.add_argument("--eval-batch-size", type=int, default=100)
+
+    subparser = subparsers.add_parser("parse")
+    subparser.set_defaults(callback=run_parse)
+    subparser.add_argument("--model-path-base", required=True)
+    subparser.add_argument("--input-path", type=str, required=True)
+    subparser.add_argument("--output-path", type=str, default="-")
     subparser.add_argument("--eval-batch-size", type=int, default=100)
 
     args = parser.parse_args()

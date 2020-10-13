@@ -4,7 +4,7 @@ This is the implementation of [Constituency parsing with Span attention](https:/
 
 This implementation is based on [Berkeley Neural Parser](https://github.com/nikitakit/self-attentive-parser).
 
-You can e-mail Yuanhe Tian at `yhtian@uw.edu` or Guimin Chen at `chenguimin@chuangxin.com`, if you have any questions.
+You can e-mail Yuanhe Tian at `yhtian@uw.edu` or Guimin Chen at `cuhksz.nlp@gmail.com`, if you have any questions.
 
 ## Prerequisites
 * `python 3.6`

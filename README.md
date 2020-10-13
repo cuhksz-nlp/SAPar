@@ -1,6 +1,6 @@
 # SAPar
 
-This is the implementation of [Constituency parsing with Span attention](https://www.aclweb.org/anthology/) at Findings of EMNLP2020.
+This is the implementation of [Constituency Parsing with Span Attention](https://www.aclweb.org/anthology/) at Findings of EMNLP2020.
 
 This implementation is based on [Berkeley Neural Parser](https://github.com/nikitakit/self-attentive-parser).
 
@@ -12,7 +12,7 @@ If you use or extend our work, please cite our paper at EMNLP-2020.
 
 ```
 @inproceedings{tian-etal-2020-constituency,
-    title = "Supertagging Combinatory Categorial Grammar with Attentive Graph Convolutional Networks",
+    title = "Constituency Parsing with Span Attention",
     author = "Tian, Yuanhe and Song, Yan and Xia, Fei and Zhang, Tong",
     booktitle = "Findings of the 2020 Conference on Empirical Methods in Natural Language Processing",
     month = nov,

@@ -2,8 +2,6 @@
 
 This is the implementation of [Constituency Parsing with Span Attention](https://www.aclweb.org/anthology/) at Findings of EMNLP2020.
 
-This implementation is based on [Berkeley Neural Parser](https://github.com/nikitakit/self-attentive-parser).
-
 You can e-mail Yuanhe Tian at `yhtian@uw.edu` or Guimin Chen at `cuhksz.nlp@gmail.com`, if you have any questions.
 
 ## Citation

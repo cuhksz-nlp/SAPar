@@ -6,6 +6,20 @@ This implementation is based on [Berkeley Neural Parser](https://github.com/niki
 
 You can e-mail Yuanhe Tian at `yhtian@uw.edu` or Guimin Chen at `cuhksz.nlp@gmail.com`, if you have any questions.
 
+## Citation
+
+If you use or extend our work, please cite our paper at EMNLP-2020.
+
+```
+@inproceedings{tian-etal-2020-constituency,
+    title = "Supertagging Combinatory Categorial Grammar with Attentive Graph Convolutional Networks",
+    author = "Tian, Yuanhe and Song, Yan and Xia, Fei and Zhang, Tong",
+    booktitle = "Findings of the 2020 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2020",
+}
+```
+
 ## Prerequisites
 * `python 3.6`
 * `pytorch 1.1`

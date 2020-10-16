@@ -1,6 +1,6 @@
 # SAPar
 
-This is the implementation of [Constituency Parsing with Span Attention](https://www.aclweb.org/anthology/) at Findings of EMNLP2020.
+This is the implementation of [Constituency Parsing with Span Attention](http://arxiv.org/abs/2010.07543) at Findings of EMNLP2020.
 
 Please contact us at `yhtian@uw.edu` or `cuhksz.nlp@gmail.com` if you have any questions.
 

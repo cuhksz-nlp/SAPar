@@ -16,6 +16,6 @@ Put `LDC03T06`, `LDC04T02`, and `LDC05T20` under the current directory and run `
 
 Put `LDC05T01` under the current directory and run `./get_ctb.sh`. You will see the processed data with gold POS tag in `../data/CTB` and the data with predicted POS tags in `../data/CTB_POS`.
 
-### PTB
+#### PTB
 
 Put `LDC99T42` under the current directory and run `./get_ptb.sh`. You will see the processed data with gold POS tag in `../data/PTB` and the data with predicted POS tags in `../data/PTB_POS`.

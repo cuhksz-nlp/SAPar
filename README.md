@@ -63,7 +63,7 @@ We use datasets in three languages: Arabic, Chinese, and English.
 * Chinese: we use CTB5 ([LDC2005T01](https://catalog.ldc.upenn.edu/LDC2005T01)).
 * English: we use PTB ([LDC99T42](https://catalog.ldc.upenn.edu/LDC99T42)). 
 
-To preprocess the data, please go to `data_processing` directory and follow the [instruction](./data_processing/README.md) to process the data. You need to obtain the official datasets yourself before running our code.
+To preprocess the data, please go to `data_processing` directory and follow the [instruction](./data_processing) to process the data. You need to obtain the official datasets yourself before running our code.
 
 Ideally, all data will appear in `./data` directory. The data with gold POS tags are located in folders whose name is the same as the dataset name (i.e., ATB, CTB, and PTB); the data with predicted POS tags are located in folders whose name has a "_POS" suffix (i.e., ATB_POS, CTB_POS, and PTB_POS).
 

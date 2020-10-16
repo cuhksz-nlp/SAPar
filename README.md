@@ -44,7 +44,7 @@ For ZEN, you can download the pre-trained model from [here](https://github.com/s
 
 For XLNet, you can download the pre-trained model from [here](https://github.com/zihangdai/xlnet).
 
-For our pre-trained model, we will release it soon.
+For our pre-trained model, you can download them from [Baidu Wangpan](https://pan.baidu.com/s/1iSUcfRHccrgGmc2GEsDDBw) (passcode: 2o1n) or Google Drive (coming soon).
 
 ## Run on Sample Data
 
@@ -63,7 +63,10 @@ We use datasets in three languages: Arabic, Chinese, and English.
 * Chinese: we use CTB5 ([LDC2005T01](https://catalog.ldc.upenn.edu/LDC2005T01)).
 * English: we use PTB ([LDC99T42](https://catalog.ldc.upenn.edu/LDC99T42)). 
 
-We will release the code to pre-process the data soon.
+To preprocess the data, please go to `data_processing` directory and follow the [instruction](./data_processing/README.md) to process the data. You need to obtain the official datasets yourself before running our code.
+
+Ideally, all data will appear in `./data` directory. The data with gold POS tags are located in folders whose name is the same as the dataset name (i.e., ATB, CTB, and PTB); the data with predicted POS tags are located in folders whose name has a "_POS" suffix (i.e., ATB_POS, CTB_POS, and PTB_POS).
+
 
 
 ## Training, Testing, and Predicting
@@ -73,8 +76,7 @@ You can find the command lines to train and test models on a specific dataset in
 
 ## To-do List
 
-* Release the code to pre-process the data.
-* Release the pre-trained model for CCG supertagging.
+* Release the pre-trained model for constituency parsing (Google Drive).
 * Regular maintenance.
 
 You can leave comments in the `Issues` section, if you want us to implement any functions.

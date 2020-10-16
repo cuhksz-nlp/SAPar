@@ -4,3 +4,5 @@ run*.sh
 /submit.py
 /lexicon_sample.zip
 /lexicon_sample/
+/data/
+/data_processing/extract_pos.py

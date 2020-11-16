@@ -1,20 +1,22 @@
 # SAPar
 
-This is the implementation of [Constituency Parsing with Span Attention](http://arxiv.org/abs/2010.07543) at Findings of EMNLP2020.
+This is the implementation of [Constituency Parsing with Span Attention](https://www.aclweb.org/anthology/2020.findings-emnlp.153/) at Findings of EMNLP2020.
 
 Please contact us at `yhtian@uw.edu` or `cuhksz.nlp@gmail.com` if you have any questions.
 
 ## Citation
 
-If you use or extend our work, please cite our paper at EMNLP-2020.
+If you use or extend our work, please cite our paper at Findings of EMNLP-2020.
 
 ```
-@inproceedings{tian-etal-2020-constituency,
-    title = "Constituency Parsing with Span Attention",
+@inproceedings{tian-etal-2020-improving,
+    title = "Improving Constituency Parsing with Span Attention",
     author = "Tian, Yuanhe and Song, Yan and Xia, Fei and Zhang, Tong",
-    booktitle = "Findings of the 2020 Conference on Empirical Methods in Natural Language Processing",
+    booktitle = "Findings of the Association for Computational Linguistics: EMNLP 2020",
     month = nov,
     year = "2020",
+    address = "Online",
+    pages = "1691--1703",
 }
 ```
 

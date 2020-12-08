@@ -46,7 +46,7 @@ For ZEN, you can download the pre-trained model from [here](https://github.com/s
 
 For XLNet, you can download the pre-trained model from [here](https://github.com/zihangdai/xlnet).
 
-For our pre-trained model, you can download them from [Baidu Wangpan](https://pan.baidu.com/s/1iSUcfRHccrgGmc2GEsDDBw) (passcode: 2o1n) or Google Drive (coming soon).
+For our pre-trained model, you can download them from [Baidu Wangpan](https://pan.baidu.com/s/1iSUcfRHccrgGmc2GEsDDBw) (passcode: 2o1n) or [Google Drive](https://drive.google.com/drive/folders/1-wINl7lLtlT0WEX88NPwyBHZOr4yKnCK?usp=sharing).
 
 ## Run on Sample Data
 
@@ -78,7 +78,6 @@ You can find the command lines to train and test models on a specific dataset in
 
 ## To-do List
 
-* Release the pre-trained model for constituency parsing (Google Drive).
 * Regular maintenance.
 
 You can leave comments in the `Issues` section, if you want us to implement any functions.
